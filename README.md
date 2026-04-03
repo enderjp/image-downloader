@@ -8,6 +8,7 @@ Herramienta mínima para experimentar con la extracción de imágenes desde enla
 - Imita agentes de usuario comunes (navegador móvil y `facebookexternalhit`).
 - Permite configurar un proxy HTTP/S (ideal para IP residencial) mediante la variable `FACEBOOK_PROXY_URL`.
 - Devuelve las URLs encontradas en tags `<img>`, `meta og:image`, `twitter:image` y `link rel="image_src"`.
+- Filtra assets obvios de Facebook (emoji, sprites, tracking pixels) y deduplica variantes de la misma imagen por tamaño/calidad.
 - Expone la lógica vía FastAPI (`POST /scrape`) para integrarla en otros servicios o desplegarla en Render.
 
 ## Requisitos

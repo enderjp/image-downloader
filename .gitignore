@@ -9,10 +9,22 @@ __pycache__/
 # Virtualenv
 venv/
 env/
+.venv/
 
 # Playwright browsers
 .ms-playwright/
 ms-playwright/
 
+# Node
+node_modules/
+
 # Local output
 out*.json
+result*.json
+puppeteer_result*.json
+*_clean.txt
+*_render*.txt
+
+# Local cookies / secrets
+*.cookies.txt
+www.facebook.com_cookies.txt
