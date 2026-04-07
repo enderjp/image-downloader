@@ -161,6 +161,7 @@ def is_noise_image_url(url: str) -> bool:
     parsed = urlparse(url)
     host = parsed.netloc.lower()
     path = parsed.path.lower()
+    query = parse_qs(parsed.query)
 
     if not host:
         return True
@@ -173,8 +174,31 @@ def is_noise_image_url(url: str) -> bool:
         return True
     if host.startswith("static.") and host.endswith("fbcdn.net"):
         return True
+    if host.startswith("external-") and "/emg1/" in path:
+        return True
+    if query.get("utld", [None])[0] in {"giphy.com", "tenor.com"}:
+        return True
+    if query.get("url", [""])[0].lower().endswith(('.gif', '.mp4')):
+        return True
 
     return False
+
+
+def is_ads_image_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.netloc.lower().endswith("facebook.com") and parsed.path.rstrip("/") == "/ads/image"
+
+
+def extract_fbcdn_asset_id(path: str) -> Optional[str]:
+    filename = path.rsplit("/", 1)[-1].lower() if path else ""
+    if not filename:
+        return None
+
+    match = re.search(r"(\d+(?:_\d+){2,}_[a-z0-9]+)\.[a-z0-9]+$", filename)
+    if match:
+        return match.group(1)
+
+    return None
 
 
 def canonical_image_key(url: str) -> str:
@@ -189,11 +213,15 @@ def canonical_image_key(url: str) -> str:
         return f"lookaside:{media_id}"
 
     ad_image_token = query.get("d", [None])[0]
-    if host.endswith("facebook.com") and path == "/ads/image" and ad_image_token:
+    if host.endswith("facebook.com") and path.rstrip("/") == "/ads/image" and ad_image_token:
         return f"fbads:{ad_image_token}"
 
+    fbcdn_asset_id = extract_fbcdn_asset_id(path)
+    if host.endswith("fbcdn.net") and fbcdn_asset_id:
+        return f"fbcdn-asset:{fbcdn_asset_id}"
+
     if host.endswith("fbcdn.net") and filename:
-        return f"fbcdn:{filename}"
+        return f"fbcdn-file:{filename}"
 
     if filename:
         return f"{host}:{filename}"
@@ -219,15 +247,23 @@ def image_variant_score(url: str) -> Tuple[int, int, int, int]:
         if max(width, height) > max_edge:
             max_edge = max(width, height)
 
-    if host.endswith("fbcdn.net") and not host.startswith("static."):
+    if is_ads_image_url(url):
+        host_priority = 4
+    elif host.endswith("fbcdn.net") and not host.startswith("static."):
         host_priority = 3
-    elif host.endswith("facebook.com") and path == "/ads/image":
-        host_priority = 1
     else:
         host_priority = 2
+
+    # Prefer URLs that do not advertise an explicit thumbnail-like size.
+    size_penalty = 0
+    if re.search(r"(?:^|[_&?])(p|s|c)\d+x\d+", raw):
+        size_penalty -= 2
+    if "q75" in raw or "cp0" in raw or "dst-jpg" in raw:
+        size_penalty -= 1
+
     query_bonus = 1 if not parsed.query else 0
 
-    return (host_priority, max_area, max_edge, query_bonus)
+    return (host_priority, max_area, max_edge, query_bonus + size_penalty)
 
 
 def extract_images(html: str) -> List[str]:
@@ -344,6 +380,7 @@ def scrape_images(url: str, *, proxy: Optional[str], cookies: Optional[str] = No
     variants = candidate_variants(normalized, include_mobile=include_mobile, max_depth=max_depth)
     logs: List[FetchLog] = []
     images_by_key: Dict[str, str] = {}
+    ads_image_candidates: List[str] = []
     script: Optional[str] = None
 
     for candidate in variants:
@@ -352,6 +389,10 @@ def scrape_images(url: str, *, proxy: Optional[str], cookies: Optional[str] = No
         if html:
             extracted = extract_images(html)
             for img_url in extracted:
+                if is_ads_image_url(img_url):
+                    if img_url not in ads_image_candidates:
+                        ads_image_candidates.append(img_url)
+                    continue
                 key = canonical_image_key(img_url)
                 existing = images_by_key.get(key)
                 if existing is None or image_variant_score(img_url) > image_variant_score(existing):
@@ -365,7 +406,17 @@ def scrape_images(url: str, *, proxy: Optional[str], cookies: Optional[str] = No
                     # don't fail the whole scrape if text extraction has an issue
                     script = script
         time.sleep(delay)
-    return ScrapeResult(normalized, logs, list(images_by_key.values()), script)
+    images = list(images_by_key.values())
+
+    # If the scrape found a single direct Facebook image plus one or more
+    # ads/image fallbacks, collapse them into a single best-quality URL.
+    direct_images = [img for img in images if not is_ads_image_url(img)]
+    if len(direct_images) == 1 and ads_image_candidates:
+        pool = [*direct_images, *ads_image_candidates]
+        best_image = max(pool, key=image_variant_score)
+        images = [best_image]
+
+    return ScrapeResult(normalized, logs, images, script)
 
 
 def scrape_with_playwright(url: str, *, proxy: Optional[str] = None, cookies: Optional[str] = None, timeout: float = DEFAULT_TIMEOUT) -> Optional[str]:
